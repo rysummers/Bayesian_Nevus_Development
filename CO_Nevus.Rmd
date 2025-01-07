@@ -1,0 +1,661 @@
+---
+title: "Bayesian Approach to Modeling Melanocytic Nevus Development in Colorado"
+subtitle: "Final Project"
+author: "Ryan Summers"
+date: "`r Sys.Date()`"
+output: 
+  bookdown::pdf_document2:
+    toc: true
+    number_sections: false
+  bookdown::html_document2:
+    toc: true
+    number_sections: false
+documentclass: article
+header-includes:
+  - \usepackage{float}
+bibliography: summers.bib
+---
+
+```{r, echo=F}
+# ---
+# output:
+#   bookdown::pdf_document2:
+#     toc: false
+#     number_sections: false
+# documentclass: article
+# geometry: margin=0.25in
+# classoption:
+# - twocolumn
+# bibliography: summers.bib
+# ---
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(number_sections = FALSE)
+knitr::opts_chunk$set(fig.align='center') 
+
+library(knitr)
+library(ggplot2)
+library(tidyverse)
+library(magrittr)
+library(ggfortify)
+library(olsrr)
+library(kableExtra)
+library(doBy)
+library(psych)
+library(MASS)
+library(dplyr)
+library(gmodels)
+library(car)
+library(broom)
+library(tictoc)
+library(parallel)
+library(readxl)
+library(lme4)
+library(quantreg)
+library(brms)
+library(loo)
+library(bayesplot)
+library(table1)
+library(gtsummary)
+library(gt)
+
+opts_chunk$set(tidy = F)
+```
+
+
+<!-- Name here: -->
+Ryan Summers, M.S. Candidate^[Colorado School of Public Health, University of Colorado Anschutz Medical Campus, Aurora, CO]
+
+\newpage
+
+```{r, echo=F, message=F}
+moles_df <- read_csv('Mole Development/Mole Count Data 2004-2008.csv')
+```
+
+```{r, echo=F, eval=F}
+# NAs per variable
+round(colSums(is.na(moles_df)), 1) # counts
+round(colSums(is.na(moles_df)) / nrow(moles_df) * 100, 1) # percentages
+
+# number of complete cases (mole counts for each year)
+nrow(moles_df[complete.cases(moles_df),])
+
+# percentage of complete cases to full dataset
+sum(complete.cases(moles_df)) / nrow(moles_df)
+```
+
+```{r, echo=F}
+# format columns
+moles_df2 <- moles_df %>%   
+  # lowercase columns & rows
+  setNames(tolower(names(.))) %>%
+  mutate_if(is.character, tolower) %>% 
+  # remove white-space in columns
+  setNames(gsub("\\s+", "_", names(.)))
+```
+
+
+```{r, echo=F}
+# calculate number of waterside vacations between 2005 and 2007 (inclusive)
+moles_df2 <- moles_df2 %>% 
+  mutate(num_vacs_bt_2005_2008 = number_vacs_birth_thru_2007-number_vacs_birth_thru_2005)
+
+```
+
+```{r, echo=F}
+# change factor variable names
+moles_df2 <- moles_df2 %>% 
+  mutate(
+    gender = case_when(
+      gender == 1 ~ "Female",
+      gender == 2 ~ "Male"
+    ),
+    hispanic = case_when(
+      hispanic == 0 ~ "No",
+      hispanic == 1 ~ "Yes"
+    ),
+    eyecolor = case_when(
+      eyecolor == 1 ~ "BLU/GRN/COMB",
+      eyecolor == 2 ~ "LBRN/DBRN",
+      eyecolor == 3 ~ "HAZ"
+    ),
+    haircolor = case_when( 
+      haircolor == 1 ~ "BLN",
+      haircolor == 2 ~ "RED",
+      haircolor == 3 ~ "BRN",
+      haircolor == 4 ~ "BLK"
+    )
+  )
+```
+
+```{r, echo=F}
+moles_df2 <- moles_df2 %>%
+  filter(complete.cases(.)) %>% 
+  mutate(across(c(gender, hispanic, eyecolor, haircolor), as.factor))
+```
+
+
+```{r, echo=F}
+label(moles_df2$gender) <- "Gender"
+label(moles_df2$hispanic) <- "Hispanic"
+label(moles_df2$eyecolor) <- "Eye Color"
+label(moles_df2$haircolor) <- "Hair Color"
+label(moles_df2$num_vacs_bt_2005_2008) <- "# of Vacations (between 2005 and 2008)"
+label(moles_df2$molecount2004) <- "Mole Count 2004"
+label(moles_df2$molecount2005) <- "Mole Count 2005"
+label(moles_df2$molecount2006) <- "Mole Count 2006"
+label(moles_df2$molecount2007) <- "Mole Count 2007"
+label(moles_df2$molecount2008) <- "Mole Count 2008"
+
+```
+
+
+```{r, echo=F, eval=F}
+moles_df2 %>% 
+  summarise(totals = sum(molecount2004, molecount2005, molecount2006, 
+                          molecount2007, molecount2008))
+```
+
+
+```{r, echo=F}
+moles_long <- moles_df2 %>%
+  filter(complete.cases(.)) %>% 
+  pivot_longer(cols = c(molecount2004, molecount2005, molecount2006,
+                        molecount2007, molecount2008), 
+               names_to = "year", values_to = "molecount") %>%
+  mutate(year = ifelse(year == "molecount2004", 2004, 
+                       ifelse(year=='molecount2005', 2005,
+                       ifelse(year=='molecount2006', 2006,
+                       ifelse(year=='molecount2007', 2007,
+                       ifelse(year=='molecount2008', 2008, NA)))))) %>% 
+  # lowercase columns & rows
+  setNames(tolower(names(.))) %>%
+  mutate_if(is.character, tolower) %>% 
+  # remove white-space in columns
+  setNames(gsub("\\s+", "_", names(.)))
+```
+
+
+```{r, echo=F}
+moles_strata1 <- c(
+    split(moles_df2, ~gender), 
+    split(moles_df2, ~hispanic),
+    list("All" = moles_df2)
+  )
+
+moles_strata2 <- c(
+    split(moles_df2, ~eyecolor),
+    split(moles_df2, ~haircolor),
+    list("All" = moles_df2)
+  )
+```
+
+
+```{r, echo=F}
+moles_labels1 <- list(
+    variables = list(
+      molecount2004 = "2004", # names denote variables, values supply labels
+      molecount2005 = "2005",
+      molecount2006 = "2006",
+      molecount2007 = "2007",
+      molecount2008 = "2008"
+    ), 
+    groups = list("Gender", "Hispanic") # this is a list of labels only
+  )
+
+moles_labels2 <- list(
+    variables = list(
+      molecount2004 = "2004", 
+      molecount2005 = "2005",
+      molecount2006 = "2006",
+      molecount2007 = "2007",
+      molecount2008 = "2008"
+    ), 
+    groups = list("Eye Color", "Hair Color", "") 
+  )
+
+moles_groups1 <- c(2,2) # gender(2), hispanic(2),....
+moles_groups2 <- c(3,4,1)
+
+tb1.1 <- table1(moles_strata1, moles_labels1, groupspan = moles_groups1)
+tb1.2 <- table1(moles_strata2, moles_labels2, groupspan = moles_groups2)
+```
+
+
+## Abstract {-}
+
+Malignant melanoma risk is primarily associated with melanocytic nevi, with the majority of these nevi forming during childhood. This study identified significant associations between mole counts and specific demographic and phenotypic factors. Children with blonde or brown hair had higher median mole counts compared to those with red hair. Gender differences were also observed, with girls having a 13% lower median mole count than boys. Additionally, non-Hispanic children exhibited a 30.7% higher median mole count compared to Hispanic children. No other comparisons showed statistically significant differences, as their 95% credible intervals overlapped zero.
+
+## Introduction {-}
+
+The incidence of malignant melanoma has reached alarming levels, nearly tripling among white individuals in the United States from 1975 to 2004. This trajectory mirrors Australia, which currently holds the world's highest melanoma rates. Racial disparities in melanoma risk are stark: non-Hispanic white individuals experience an annual incidence rate of 25.1 per 100,000 population, compared to significantly lower rates among other racial and ethnic groups, such as 1.0 for black individuals and 4.5 for Hispanic white individuals.
+
+The presence of melanocytic nevi emerges as the strongest risk factor for melanoma. Most nevi develop during childhood, influenced by factors including lighter skin, hair color, blue or green eyes, and sun exposure. Because the risk factors for nevi closely parallel those for melanoma, researchers increasingly study nevi as intermediate markers that could provide insights into melanoma's underlying causes.
+
+To this end, a behavioral intervention trial was conducted from 2004 to 2007, focusing on sun protection education for both parents and children, based on the Precaution Adoption Process Model. Children in the study received resources such as sun hats, swim shirts, sunscreen, tree seeds, and sun-protection learning activities. Individual children were randomly assigned to either an intervention group, which received the sun protection education and resources, or to a standard care control group, which did not receive the intervention. This study provides a unique opportunity to examine the impact of sun protection education on nevus development and its potential role in melanoma prevention.
+
+By tracking the development of nevi in both intervention and control groups over time, this study aims to investigate whether the intervention leads to a significant difference in mole counts and how these trends relate to known melanoma risk factors. Additionally, the study will explore how demographic characteristics such as skin tone, hair color, and ethnicity, may interact with the intervention to influence nevus development.
+
+
+## Hypothesis {-}
+
+This study examines trends in nevus development over time and their associations with melanoma risk factors within the context of a sun protection intervention. We hypothesize that demographic factors (e.g., gender, ethnicity, and phenotypic characteristics such as eye and hair color) and waterside vacations may interact with the intervention to influence nevus development. Specifically, we expect that children with lighter skin tones, light-colored eyes, or hair may exhibit higher nevus counts over the study period.
+
+
+## Materials and Methods {-}
+
+This study was part of two behavioral intervention trials conducted between 1998 and 2007, aimed at improving sun protection practices in children. Eligible children born between January 1, 1998, and September 30, 1998, were recruited from a large managed care organization (MCO) serving the Denver/Boulder metropolitan area. Out of 2,148 births, 728 families (61.9%) were enrolled. Participants were randomly assigned to either a control group or an intervention group.
+
+The intervention group received educational materials and resources (e.g., sun hats, sunscreen, swim shirts) from 2004 to 2007, based on the Precaution Adoption Process Model. The control group received standard care. Researchers assessed nevus counts through skin examinations at ages 3 and 4 years. Parents completed surveys about demographic information and sun exposure. Total participation resulted in 472 participants.
+
+## Analysis Plan {-}
+
+Prior to conducting the analysis, we excluded any participants with incomplete mole count data for any of the study years (2004 to 2008) from the analysis. Only children who had complete data for mole counts across all time points were included in the final dataset. This approach ensured that all analyses were based on participants with full longitudinal data, allowing for valid comparisons and reducing potential bias due to missing data. 
+
+The dataset did not include explicit identifiers for the control and intervention groups. However, based on the available information, we will examine trends in nevus development over time and explore their potential associations with melanoma risk factors within the context of a sun protection intervention. 
+
+We will utilize Bayesian generalized non-linear multivariate multilevel model with a negative binomial distribution to analyze nevus count data. The statistical approach incorporates fixed effects for demographic variables, with random effects accounting for repeated participant measurements across the years, while allowing us to model count data that violates the equal variance assumption. Key covariates including number of waterside vacations during study, demographic characteristics, and baseline skin color will be included to control potential confounding factors. The significance level for all tests will be set at 0.05. In cases where posterior distributions are used (as in Bayesian analysis), credible intervals will be evaluated, and results will be considered significant if the 95% credible interval does not include zero. 
+
+Analyses will be conducted using R (v4.4.1: Race for Your Life) and the `brms` package, enabling flexible Bayesian modeling that accommodates the complex data structure and provides robust inference about the intervention's impact on nevus counts across demographic subgroups.
+
+## Results {-}
+
+```{r, echo=F, message=F}
+kable(tb1.1, "latex", booktabs = T, caption="Summary of Nevi (Mole) Counts Stratified by Gender and Ethnicity Over Study Period (2004 to 2008)") %>%
+  add_header_above(c(" " = 1, "Gender" = 2, "Hispanic" = 2," " = 1)) %>%
+  kable_styling(latex_options = c("scale_down", "HOLD_position")) %>% 
+  row_spec(0, bold = TRUE, color = "black") %>%  
+  column_spec(1, bold = TRUE)  
+```
+
+
+```{r, echo=F, message=F, results='hide'}
+# fit a Bayesian Poisson/Neg.Binomial model
+bayes.model1 <- brm(molecount ~ year + hispanic + gender + eyecolor + haircolor + 
+        baseskincolor + num_vacs_bt_2005_2008 + (1|respondent_code_number),
+      data = moles_long,
+      family = negbinomial(link = "log"), # NB to address over-dispersion
+      prior = c(
+        prior(normal(0, 10), class = "b"),  # prior for fixed effects
+        prior(cauchy(0, 2), class = "sd"),   # prior for random effects
+        prior(inv_gamma(0.4, 0.3), class = "shape") # prior for shape parameter
+        ),
+      iter=4000, chains=4, cores=8,
+      save_pars = save_pars(all = TRUE),
+      seed=42  # reproducibility
+      )
+```
+
+```{r, echo=F, message=F, eval=F}
+summary(bayes.model1)
+```
+
+
+Trends in mole development were analyzed in relation to factors including hair and eye color, as well as demographic variables. Although explicit group assignments (intervention vs. control) were not available, the results reveal significant associations between certain demographic characteristics, waterside vacations taken during the study, and mole counts.
+
+The study found notable differences in mole counts based on hair color. Compared to children with red hair, those with blonde hair were expected to have a 55.5% higher median mole count (rate ratio = 1.555, 95% HDI: [1.20, 1.96]). Similarly, children with brown hair demonstrated a 51.9% higher median mole count relative to those with red hair (rate ratio = 1.519, 95% HDI: [1.17, 1.92]).
+
+Gender also showed a significant variation in mole counts. Girls were expected to have a 13% lower median mole count compared to boys (rate ratio = 0.870, 95% HDI: [0.77, 0.98]). Ethnicity emerged as another distinguishing factor, with non-Hispanic children expected to have a 30.7% higher median mole count compared to Hispanic children (rate ratio = 1.307, 95% HDI: [1.03, 1.61]).
+
+For all other pairwise comparisons, the 95% credible intervals overlapped zero and were consequently not considered statistically significant.
+
+
+```{r trends-plot, echo=F, fig.height=7, fig.width=9, fig.cap="Nevi Count Trends (2004-2008)"}
+# Set up the plotting grid (2 rows, 2 columns)
+par(mfrow = c(2, 2)) 
+
+# Gender: Male vs. Female
+plot_data <- aggregate(molecount ~ year + gender, moles_long, median)
+
+# Plot the first group (e.g., Male)
+plot(plot_data$year[plot_data$gender == "Male"], 
+     plot_data$molecount[plot_data$gender == "Male"], 
+     type = "b", col = "blue", pch = 16, 
+     main = "Gender", 
+     xlab = "", ylab = "Median Nevi Count", xlim = range(plot_data$year), 
+     ylim = range(plot_data$molecount))
+
+
+# Overlay the second group (e.g., Female)
+lines(plot_data$year[plot_data$gender == "Female"], 
+      plot_data$molecount[plot_data$gender == "Female"], 
+      type = "b", col = "red", pch = 16)
+legend("topleft", legend = c("Male", "Female"), 
+       col = c("blue", "red"), pch = 16)
+
+# Hispanic: Yes vs. No
+plot_data <- aggregate(molecount ~ year + hispanic, moles_long, median)
+
+# plot Hispanic
+plot(plot_data$year[plot_data$hispanic == "Yes"], 
+     plot_data$molecount[plot_data$hispanic == "Yes"], 
+     type = "b", col = "darkgreen", pch = 16, 
+     main = "Ethnicity (Hispanic)", 
+     xlab = "", ylab = "Median Nevi Count", xlim = range(plot_data$year), 
+     ylim = range(plot_data$molecount))
+
+# overlay the other groups
+lines(plot_data$year[plot_data$hispanic == "No"], 
+      plot_data$molecount[plot_data$hispanic == "No"], 
+      type = "b", col = "purple", pch = 16)
+legend("topleft", legend = c("Yes", "No"), 
+       col = c("darkgreen", "purple"), pch = 16)
+
+# hair color
+plot_data <- aggregate(molecount ~ year + haircolor, moles_long, median)
+
+# plot hair color group
+plot(plot_data$year[plot_data$haircolor == "BLN"], 
+     plot_data$molecount[plot_data$haircolor == "BLN"], 
+     type = "b", col = "orange", pch = 16, 
+     main = "Hair Color", 
+     xlab = "Year", ylab = "Median Nevi Count", xlim = range(plot_data$year), 
+     ylim = range(plot_data$molecount))
+
+# overlay the other groups
+lines(plot_data$year[plot_data$haircolor == "BRN"], 
+      plot_data$molecount[plot_data$haircolor == "BRN"], 
+      type = "b", col = "brown", pch = 16)
+lines(plot_data$year[plot_data$haircolor == "BLK"], 
+      plot_data$molecount[plot_data$haircolor == "BLK"], 
+      type = "b", col = "black", pch = 16)
+lines(plot_data$year[plot_data$haircolor == "RED"], 
+      plot_data$molecount[plot_data$haircolor == "RED"], 
+      type = "b", col = "red", pch = 16)
+legend("topleft", legend = c("BLN", "BRN", "BLK", "RED"), 
+       col = c("orange", "brown", "black", "red"), pch = 16)
+
+# eye color
+plot_data <- aggregate(molecount ~ year + eyecolor, moles_long, median)
+
+# plot eye color groups
+plot(plot_data$year[plot_data$eyecolor == "BLU/GRN/COMB"], 
+     plot_data$molecount[plot_data$eyecolor == "BLU/GRN/COMB"], 
+     type = "b", col = "royalblue1", pch = 16, 
+     main = "Eye Color", 
+     xlab = "Year", ylab = "Median Nevi Count", xlim = range(plot_data$year), 
+     ylim = range(plot_data$molecount))
+
+# overaly the other groups 
+lines(plot_data$year[plot_data$eyecolor == "HAZ"], 
+      plot_data$molecount[plot_data$eyecolor == "HAZ"], 
+      type = "b", col = "darkgreen", pch = 16)
+lines(plot_data$year[plot_data$eyecolor == "LBRN/DBRN"], 
+      plot_data$molecount[plot_data$eyecolor == "LBRN/DBRN"], 
+      type = "b", col = "brown", pch = 16)
+legend("topleft", legend = c("B/G/C", "HAZ", "BRN"), 
+       col = c("royalblue1", "darkgreen", "brown"), pch = 16)
+
+# reset plotting area
+par(mfrow = c(1, 1))
+
+```
+
+
+Trend analysis revealed a significant increase in mole counts year after year (Figure 1). For the children under study, for every additional year between 2004 and 2008, the expected mole count increased by 25% on average ($\hat{\beta}_{year}$=1.25, 95% HDI: [1.24, 1.26]). Furthermore, it was noted that for every additional waterside vacation taken between 2005 and 2008, the expected mole count increased by 10% on average ($\hat{\beta}_{vacations}$=1.10, 95% HDI: [1.04, 1.17]) *Supplementary Table 1*.
+
+Lastly, a child's baseline skin color indicated that for every additional point on the color scale, there was a 6% decrease in expected mole counts on average ($\hat{\beta}_{skin}$=0.94, 95% HDI: [0.90, 0.97]) *Supplementary Table 1*. Higher values of the continuous skin color scale indicate a darker skin color.
+
+## Conclusions {-}
+
+Our study provides insights into the demographic and environmental factors influencing mole development among children between 2004 and 2008. Hair color emerged as a significant predictor of mole count, with blonde and brown-haired children showing substantially higher mole counts compared to those with red hair. Gender differences were apparent, with girls demonstrating a 13% lower median mole count than boys.
+
+A notable trend was the consistent year-over-year increase in mole counts, with a 25% average increase annually. The positive association with waterside vacations—a 10% increase in expected mole count per vacation—suggests potential environmental influences on mole development. Additionally, an inverse relationship was observed between skin color and mole counts, with a 6% decrease in expected mole count for each point increase on the skin color scale.
+
+These findings highlight the need for increased sun protection awareness and the increased risk of developing skin-based cancers like melanoma. The observed variations in mole counts across different demographic groups underscore the importance of personalized skin health monitoring.
+
+Limitations include the lack of explicit intervention and control group assignments and the narrow study timeframe. Model limitations were particularly evident in the inclusion of interaction terms. Convergence issues arose when attempting to model interactions between gender, hair, and eye color—areas of specific interest. Future work will explore different modeling techniques and run simulations testing various priors to achieve convergence.
+
+\newpage
+
+## References {-}
+
+<div id="refs"></div>
+[@10.1016/j.amepre.2012.06.022]
+[@10.1158/1055-9965.EPI-08-0634]
+[@10.1001/archdermatol.2008.571]
+[@Stan]
+[@PredictiveChecks]
+
+# Appendix A: Supplementary Tables
+
+```{r, echo=F, message=F, warning=F}
+library(gtsummary)
+library(gt)
+my_theme <-list("tbl_regression-str:ref_row_text" = "Ref")
+set_gtsummary_theme(my_theme)
+theme_gtsummary_journal("jama")
+
+
+tbl_regression(bayes.model1, exponentiate=T,
+               label = list(
+                 year~"Year",
+                 baseskincolor~"Base Skin Color (Higher=Darker)",
+                 num_vacs_bt_2005_2008~"Vacations ('05-'08)")) %>% 
+  bold_labels() %>%
+  italicize_levels() %>% 
+  as_gt() %>% 
+  tab_options(
+    #table.width='65%',
+     table.font.size = px(12)) %>% 
+  tab_header(
+    title = md('Supplementary Table 1: Bayesian Negative Binomial (NB) Regression Results'),
+    subtitle=md('Trends in Nevus Development and Associations with Melanoma Risk Factors')) 
+
+```
+
+```{r, echo=F, message=F, warning=F, results='hide'}
+# pairwise (hypothesis) testing
+library(emmeans)
+
+# unction to compute emmeans, pairs, and convert to a data frame
+compute_pairs <- function(model, group_var) {
+  emms <- emmeans(model, as.formula(paste("~", group_var)), adjust='Tukey')
+  pairs <- pairs(emms, type = "response")
+  as.data.frame(pairs)
+}
+
+# variables of interest
+group_vars <- c("gender", "hispanic", "eyecolor", "haircolor")
+
+# apply fucnction
+emm_pairs <- do.call(rbind, lapply(group_vars, compute_pairs, model = bayes.model1))
+
+```
+
+```{r, echo=F, message=F, warning=F}
+# create a table for comparisons
+emm_pairs %>%
+  gt() %>% 
+  tab_row_group(
+    label = "Gender",
+    rows = contrast %in% c("Female / Male")
+  ) %>%
+  tab_row_group(
+    label = "Hispanic",
+    rows = contrast %in% c("No / Yes")
+  ) %>%
+  tab_row_group(
+    label = "Eye Color",
+    rows = contrast %in% c("(BLU/GRN/COMB) / HAZ", "(BLU/GRN/COMB) / (LBRN/DBRN)",
+                           "HAZ / (LBRN/DBRN)")
+  ) %>%
+  tab_row_group(
+    label = "Hair Color",
+    rows = contrast %in% c("BLK / BLN", "BLK / BRN", "BLK / RED", "BLN / BRN", "BLN / RED",
+                           "BRN / RED")
+  ) %>%
+  tab_style(
+    style = list(
+      cell_fill(color = "gray95"),
+      cell_text(weight = "bold")),
+    locations = list(
+      cells_row_groups())) %>% 
+  
+  tab_style(
+    style=cell_fill(color="gray95"),
+    locations=cells_title()
+  ) %>% 
+
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels()) %>%
+  
+  cols_merge(
+    columns=c(lower.HPD, upper.HPD),
+    pattern="({1}, {2})"
+  ) %>% 
+  
+  # format rounding output
+  fmt_number(
+    columns = c(contrast, ratio), 
+    decimals = 3) %>% 
+  fmt_number(columns=c(lower.HPD, upper.HPD),
+             decimals=2) %>% 
+  
+    # modify column names
+  cols_label(
+    contrast ~ md('Contrast'),
+    ratio ~ md("Est. Ratio"),
+    lower.HPD ~ "95% HDI",
+    upper.HPD ~ "UL.HPD"
+  ) %>%
+  
+  cols_width(
+    upper.HPD ~ px(150)) %>% 
+
+  # add a source note
+  tab_source_note(
+    source_note = md(c(
+    '_Note:_ <br>Results are averaged over the levels of: hispanic, eyecolor, haircolor, gender'))) %>% 
+  
+  # add a header and subtitle
+  tab_header(
+    title = md('Supplementary Table 2: Contrast Analysis'),
+    subtitle = md("Outcome: Median Mole Counts")) %>% 
+  
+  tab_options(
+    #table.width = '65%',
+    table.font.size = px(12)) %>% 
+  
+  # add a footnote (if needed)
+  tab_footnote(
+    footnote = md("Point estimate displayed: ratio of medians 
+Results are back-transformed from the log scale"),
+locations=cells_column_labels(2)) %>% 
+  tab_footnote(
+    footnote = md("HPD interval probability: 0.95 w/ Tukey Adjustment"),
+    locations = cells_column_labels(c(3,4))) 
+```
+
+
+```{r, echo=F, message=F, eval=F}
+kable(tb1.2, "latex", booktabs = T, caption="Characteristics of Study Participants by Nevi Count") %>%
+  add_header_above(c(" " = 1, "Eye Color" = 3, "Hair Color" = 4," " = 1), 
+                   bold=T) %>%
+  kable_styling(latex_options = c("scale_down")) %>% 
+  row_spec(0, bold = TRUE, color = "black") %>%  
+  column_spec(1, bold = TRUE)  
+
+```
+
+```{r, echo=F, results='hide'}
+# exponentiate and summarize the posterior 
+summary(bayes.model1)$fixed %>%
+  as.data.frame() %>%
+  mutate(
+    Exp_Beta = round(exp(Estimate),3),
+    Exp_LL = round(exp(`l-95% CI`),3),
+    Exp_UL = round(exp(`u-95% CI`),3)) %>%
+  dplyr::select(Exp_Beta, Exp_LL, Exp_UL)
+```
+
+```{r, echo=F, eval=F}
+# cross-validation metric for predictive performance
+(loo1 <- loo(bayes.model1, save_psis = TRUE)) #moment_match = T:too comp. exp.
+plot(loo1)
+
+# marginal posterior predictive check
+yrep <- posterior_predict(bayes.model1)
+ppc_loo_pit_qq(
+  y = moles_long$molecount,
+  yrep = yrep,
+  lw = weights(loo1$psis_object))
+
+
+```
+
+```{r, echo=F, eval=F}
+### Diagnostics code
+
+# Convert model to an array of samples
+posterior_samples <- as.array(bayes.model1)
+
+# Trace plots for each parameter
+mcmc_trace(posterior_samples,
+                          pars = c("b_year", "b_genderMale", "b_hispanicYes",
+                                   "b_num_vacs_bt_2005_2008", "b_baseskincolor"))
+
+# Density plots for each parameter
+mcmc_areas(posterior_samples,
+                            pars = c("b_year", "b_genderMale", "b_hispanicYes",
+                                   "b_num_vacs_bt_2005_2008", "b_baseskincolor"))
+
+
+# Get the summary from brms that includes R-hat and ESS
+model_summary <- summary(bayes.model1)
+print(model_summary$fixed)
+
+# Extracting ESS data
+ess_data <- data.frame(
+  Parameter = rownames(model_summary$fixed),
+  ESS = model_summary$fixed[, "Est.Error"])
+
+# Plotting using ggplot2
+ggplot(ess_data, aes(x = Parameter, y = ESS)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Effective Sample Size for Each Parameter",
+       x = "Parameter",
+       y = "ESS")
+```
+
+
+```{r, echo=F, eval=F}
+# posterior predictive check
+  # compaires the observed outcome variable (molecounts) to simulated datasets
+  # (molecounts^rep) from the posterior predictive distribution
+pp_check(bayes.model1)
+```
+
+```{r, echo=F, eval=F}
+# model estimates of dispersion
+dispersion <- function(x) {var(x)/mean(x)}
+ppc_stat(y = moles_long$molecount, 
+         yrep = posterior_predict(bayes.model1, draws = 1000), stat='dispersion')
+```
+
+
+
+
+```{r, echo=F, eval=F}
+lagsar <- as.matrix(bayes.model1, pars = "b_hispanicYes")
+estimates <- quantile(lagsar, probs = c(0.25, 0.5, 0.75))
+mcmc_hist(lagsar) +
+  vline_at(estimates, linetype = 2, size = 1) +
+  ggtitle("posterior median and 50% central interval")
+```
+
+
+# Appendix B: Code 
+```{r, ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+```
+
+```{r, eval=F}
+sessionInfo()
+```
+
+
+
+
+
